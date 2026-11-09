@@ -132,3 +132,16 @@ dmypy.json
 .pyre/
 
 IDRiD_data
+
+data/
+.claude/
+
+# Local pre-trained weights (large)
+weights/
+
+logs/
+output_dir/
+output_logs/
+oct/
+Data Description (1).pdf
+TrainingAnnotation.csv

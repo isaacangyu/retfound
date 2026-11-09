@@ -1,14 +1,34 @@
 import os
+import warnings
+
 import torch
 from torch.utils.data import Subset
 from torchvision import datasets, transforms
 from timm.data import create_transform
 from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 
+from util.oct_tasks import OctMilDataset, OctTaskDataset, select_and_split, task_columns
+
+
+# ---------------------------------------------------------------------------
+# Builders
+# ---------------------------------------------------------------------------
+
 def build_dataset(is_train, args):
     transform = build_transform(is_train, args)
-    root = os.path.join(args.data_path, is_train)
-    dataset = datasets.ImageFolder(root, transform=transform)
+    task_mode = getattr(args, "task_type", None) is not None
+
+    if task_mode:
+        # OCT benchmark: filter data/index.csv and split by patient (util/oct_tasks.py)
+        split = select_and_split(args)
+        if split["mil"]:  # one item per eye bag (see oct_tasks.use_mil)
+            dataset = OctMilDataset(split["bags"][is_train], args.data_path, task_columns(args),
+                                    split["norm"], transform=transform)
+        else:
+            dataset = OctTaskDataset(split["frames"][is_train], args.data_path, task_columns(args),
+                                     split["norm"], transform=transform)
+    else:
+        dataset = datasets.ImageFolder(os.path.join(args.data_path, is_train), transform=transform)
 
     if is_train == 'train':
         ratio = float(getattr(args, "dataratio", 1.0))
@@ -16,6 +36,10 @@ def build_dataset(is_train, args):
         stratified = bool(getattr(args, "stratified", False))
 
         if 0.0 < ratio < 1.0:
+            if stratified and task_mode:
+                warnings.warn("--stratified is not supported with OCT task flags; "
+                              "using a simple random subsample.")
+                stratified = False
             if stratified:
                 idx = _stratified_indices(dataset.targets, ratio, seed)
             else:

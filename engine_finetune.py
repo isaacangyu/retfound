@@ -15,6 +15,8 @@ from sklearn.metrics import (
 from pycm import ConfusionMatrix
 import util.misc as misc
 import util.lr_sched as lr_sched
+import util.oct_tasks as oct_tasks
+
 
 def train_one_epoch(
     model: torch.nn.Module,
@@ -43,12 +45,13 @@ def train_one_epoch(
         if data_iter_step % accum_iter == 0:
             lr_sched.adjust_learning_rate(optimizer, data_iter_step / len(data_loader) + epoch, args)
         
-        samples, targets = samples.to(device, non_blocking=True), targets.to(device, non_blocking=True)
+        targets = targets.to(device, non_blocking=True)
         if mixup_fn:
+            samples = samples.to(device, non_blocking=True)
             samples, targets = mixup_fn(samples, targets)
         
         with torch.cuda.amp.autocast():
-            outputs = model(samples)
+            outputs = oct_tasks.forward_samples(model, samples, device)  # MIL bags are mean-pooled
             loss = criterion(outputs, targets)
         loss_value = loss.item()
         loss /= accum_iter
@@ -58,7 +61,8 @@ def train_one_epoch(
         if (data_iter_step + 1) % accum_iter == 0:
             optimizer.zero_grad()
         
-        torch.cuda.synchronize()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
         metric_logger.update(loss=loss_value)
         min_lr = 10.
         max_lr = 0.
@@ -84,6 +88,8 @@ def train_one_epoch(
 @torch.no_grad()
 def evaluate(data_loader, model, device, args, epoch, mode, num_class, log_writer):
     """Evaluate the model."""
+    if getattr(args, 'task_type', None) is not None:
+        return evaluate_task(data_loader, model, device, args, epoch, mode, log_writer)
     criterion = nn.CrossEntropyLoss()
     metric_logger = misc.MetricLogger(delimiter="  ")
     os.makedirs(os.path.join(args.output_dir, args.task), exist_ok=True)
@@ -146,3 +152,67 @@ def evaluate(data_loader, model, device, args, epoch, mode, num_class, log_write
         plt.savefig(os.path.join(args.output_dir, args.task, 'confusion_matrix_test.jpg'), dpi=600, bbox_inches='tight')
     
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}, score
+
+
+@torch.no_grad()
+def evaluate_task(data_loader, model, device, args, epoch, mode, log_writer):
+    """Evaluation for the OCT task flags (--multi-binary / --single-real / --response).
+
+    Appends per-target + overall rows to output_dir/<task>/metrics_<mode>.csv. In test
+    mode also writes benchmark/<run>/{analysis.tsv, predictions_test.csv} and updates
+    benchmark/analysis.tsv. Returns (stats, score); see oct_tasks.task_metrics for score.
+    """
+    columns = oct_tasks.task_columns(args)
+    split = oct_tasks.select_and_split(args)
+    criterion = oct_tasks.OctTaskLoss([k for _, k in columns], smoothing=0.0)
+    metric_logger = misc.MetricLogger(delimiter="  ")
+    out_dir = os.path.join(args.output_dir, args.task)
+    os.makedirs(out_dir, exist_ok=True)
+
+    model.eval()
+    outs, tgts = [], []
+    use_amp = torch.device(device).type == 'cuda'
+    for batch in metric_logger.log_every(data_loader, 10, f'{mode}:'):
+        target = batch[-1].to(device, non_blocking=True).float()
+        with torch.autocast(device_type='cuda', enabled=use_amp):
+            output = oct_tasks.forward_samples(model, batch[0], device)
+        loss = criterion(output, target)
+        metric_logger.update(loss=loss.item())
+        outs.append(output.float().cpu().numpy())
+        tgts.append(target.cpu().numpy())
+    metric_logger.synchronize_between_processes()
+
+    pred, tgt = oct_tasks.decode_outputs(np.concatenate(outs), np.concatenate(tgts), columns, split['norm'])
+    rows = oct_tasks.task_metrics(pred, tgt, columns, mode=oct_tasks.label_mode(args))
+    score = rows[-1]['score']
+    score = float('-inf') if np.isnan(score) else score
+    loss_avg = metric_logger.meters['loss'].global_avg if 'loss' in metric_logger.meters else float('nan')
+
+    print(f'{mode} loss: {loss_avg:.4f}')
+    print(oct_tasks.format_rows(rows))
+    print(f'Score: {score:.4f}')
+
+    if log_writer:
+        for k, v in rows[-1].items():
+            if isinstance(v, float) and not np.isnan(v):
+                log_writer.add_scalar(f'perf/{k}', v, epoch)
+
+    if misc.is_main_process():
+        path = os.path.join(out_dir, f'metrics_{mode}.csv')
+        exists = os.path.isfile(path)
+        with open(path, 'a', newline='', encoding='utf8') as f:
+            wf = csv.writer(f)
+            if not exists:
+                wf.writerow(['epoch', 'loss'] + oct_tasks.METRIC_COLS)
+            for r in rows:
+                wf.writerow([epoch, loss_avg] + [r.get(c, '') for c in oct_tasks.METRIC_COLS])
+
+        if mode == 'test':
+            frame = data_loader.dataset.frame
+            if args.dist_eval and misc.get_world_size() > 1:
+                print('Warning: --dist_eval test predictions cover only this rank; skipping benchmark outputs.')
+            else:
+                oct_tasks.write_test_outputs(args, rows, pred, tgt, frame,
+                                             best_epoch=getattr(args, 'best_epoch', None))
+
+    return {'loss': loss_avg, 'score': score}, score

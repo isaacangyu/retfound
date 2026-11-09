@@ -24,6 +24,7 @@ import models_vit as models
 import util.lr_decay as lrd
 import util.misc as misc
 from util.datasets import build_dataset
+import util.oct_tasks as oct_tasks
 from util.pos_embed import interpolate_pos_embed
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
 from engine_finetune import train_one_epoch, evaluate
@@ -69,7 +70,8 @@ def get_args_parser():
     # ---- Augmentation
     parser.add_argument("--color_jitter", type=float, default=None, metavar="PCT")
     parser.add_argument("--aa", type=str, default="rand-m9-mstd0.5-inc1", metavar="NAME")
-    parser.add_argument("--smoothing", type=float, default=0.1)
+    parser.add_argument("--smoothing", type=float, default=0.1,
+                        help="Label smoothing eps (mixup, and binary targets with --soft-label)")
 
     # ---- Random erase
     parser.add_argument("--reprob", type=float, default=0.25, metavar="PCT")
@@ -88,12 +90,56 @@ def get_args_parser():
     # ---- Finetuning & adaptation
     parser.add_argument("--finetune", default="", type=str, help="Checkpoint id/path (see model rules below)")
     parser.add_argument("--task", default="", type=str, help="Task name for logging/output grouping")
-    parser.add_argument("--adaptation", default="finetune", choices=["finetune", "lp"],
-                        help="Adaptation strategy: finetune=full fine-tune, lp=linear probe (train head only)")
+    parser.add_argument("--adaptation", default="lp", choices=["finetune", "lp"],
+                        help="lp (default) = freeze the encoder, train only the head; finetune = train all")
+    parser.add_argument("--head", default="mlp", choices=["mlp", "linear"],
+                        help="Prediction head: mlp = Linear-GELU-Dropout-Linear (default), linear = one Linear")
+    parser.add_argument("--head_hidden", default=512, type=int, help="Hidden width of the MLP head")
+    parser.add_argument("--head_dropout", default=0.1, type=float, help="Dropout inside the MLP head")
 
     # ---- Dataset & paths
     parser.add_argument("--data_path", default="./data/", type=str)
-    parser.add_argument("--nb_classes", default=8, type=int)
+    parser.add_argument("--nb_classes", default=None, type=int,
+                        help="Number of classes for ImageFolder mode (default 8). "
+                             "Ignored with an OCT task flag (set from the task).")
+
+    # ---- OCT benchmark tasks (data store from prepare_data.py; pick at most one)
+    task = parser.add_mutually_exclusive_group()
+    task.add_argument("--multi-binary", dest="task_type", action="store_const", const="multi_binary",
+                      help="Post IRF, SRF, HRF: 3 sigmoid outputs, BCE")
+    task.add_argument("--single-real", dest="task_type", action="store_const", const="single_real",
+                      help="Post CST: 1 output, MSE on z-scored CST")
+    task.add_argument("--response", dest="task_type", action="store_const", const="response",
+                      help="Post VA (MSE, z-scored) + continue injection (BCE): 2 outputs")
+    task.add_argument("--pre-features", dest="task_type", action="store_const", const="pre_features",
+                      help="Pre-treatment CST (MSE, z-scored) + IRF, PED, HRF (BCE): 4 outputs")
+    parser.set_defaults(task_type=None)
+    lab = parser.add_mutually_exclusive_group()
+    lab.add_argument("--soft-label", dest="soft_label", action="store_true",
+                     help="Binary targets predicted as a probability in [0,1] (default; no smoothing, "
+                          "no threshold)")
+    lab.add_argument("--hard-label", dest="soft_label", action="store_false",
+                     help="Binary targets predicted as a 0/1 class, trained with label smoothing "
+                          "(eps = --smoothing)")
+    parser.set_defaults(soft_label=True)
+    parser.add_argument("--eye", nargs="+", default=["OS"], choices=["OD", "OS"])
+    parser.add_argument("--visit", nargs="+", default=["pre"], choices=["pre", "post"])
+    parser.add_argument("--image_idx", nargs="+", type=lambda v: v if v == "all" else int(v), default=[0],
+                        help="Slice indices to use, or 'all' for every slice of each eye (turns on MIL)")
+    parser.add_argument("--diagnosis", nargs="+", type=int, default=[3],
+                        help="Diagnosis codes (default 3 = DME). 1 wet AMD, 2 PCV, 3 DME, 4 RVO, 5 CME, "
+                             "6 fellow eye, 9 other. Pass 0 for all codes.")
+    parser.add_argument("--hub_repo", default=None,
+                        help="Hugging Face repo id (e.g. user/retfound-oct). If set, checkpoint-best.pth and "
+                             "the benchmark files are uploaded to <repo>/<task>/ after testing. Needs a write token.")
+    parser.add_argument("--hub_public", action="store_true", help="Create the hub repo as public (default private)")
+    parser.add_argument("--hub_keep_local", action="store_true",
+                        help="Keep checkpoint-best.pth after uploading (default: delete it once the upload is verified)")
+    parser.add_argument("--anti_vegf", nargs="+", type=int, default=None, help="anti-VEGF codes (default all)")
+    parser.add_argument("--split_ratio", nargs=3, type=float, default=[0.6, 0.2, 0.2],
+                        help="train/val/test fractions of patients")
+    parser.add_argument("--split_seed", type=int, default=42)
+    parser.add_argument("--benchmark_dir", default="./benchmark")
     parser.add_argument("--output_dir", default="./output_dir")
     parser.add_argument("--log_dir", default="./output_logs")
 
@@ -161,6 +207,35 @@ def main(args, criterion):
     np.random.seed(seed)
     cudnn.benchmark = True
 
+    # ---- Task setup: number of outputs and loss
+    if args.task_type is not None:
+        mixup_requested = (args.mixup > 0) or (args.cutmix > 0.) or (args.cutmix_minmax is not None)
+        if mixup_requested:
+            raise ValueError("Mixup/CutMix is not supported with OCT task flags; "
+                             "set --mixup 0 --cutmix 0 and leave --cutmix_minmax unset.")
+        columns = oct_tasks.task_columns(args)
+        if args.nb_classes is not None and args.nb_classes != len(columns):
+            print(f"Warning: --nb_classes={args.nb_classes} ignored; task '{args.task_type}' has "
+                  f"{len(columns)} outputs.")
+        args.nb_classes = len(columns)
+        if args.diagnosis == [0]:
+            args.diagnosis = None  # 0 = no diagnosis filter
+        criterion = oct_tasks.OctTaskLoss([k for _, k in columns], smoothing=oct_tasks.label_smoothing(args))
+        split = oct_tasks.select_and_split(args)
+        print(f"[OCT task] {args.task_type}: {columns}; label mode: "
+              f"{oct_tasks.label_mode(args)} (smoothing {oct_tasks.label_smoothing(args)}); "
+              f"filter: {split['filter']}")
+        if split["mil"]:
+            print("  MIL on (both eyes, >1 image_idx or image_idx all): one bag per patient/eye/visit, "
+                  "slice outputs mean-pooled; --batch_size counts bags")
+        for s_ in ("train", "val", "test"):
+            bags_ = f", {len(split['bags'][s_])} bags" if split["mil"] else ""
+            print(f"  {s_}: {len(split['frames'][s_])} slices{bags_}, {len(split['patients'][s_])} patients")
+        if misc.is_main_process():
+            oct_tasks.write_filter_json(args)
+    elif args.nb_classes is None:
+        args.nb_classes = 8
+
     # ---- Build model
     if args.model == "RETFound_mae":
         model = models.__dict__[args.model](
@@ -176,6 +251,18 @@ def main(args, criterion):
             args=args,
         )
 
+    # ---- Prediction head (built before weight loading so --resume restores it)
+    if args.head == "mlp":
+        in_features = model.head.in_features
+        model.head = torch.nn.Sequential(
+            torch.nn.Linear(in_features, args.head_hidden),
+            torch.nn.GELU(),
+            torch.nn.Dropout(args.head_dropout),
+            torch.nn.Linear(args.head_hidden, args.nb_classes),
+        )
+        print(f"[Head] MLP {in_features} -> {args.head_hidden} -> {args.nb_classes} "
+              f"(dropout {args.head_dropout})")
+
     # ---- Load pre-trained weights (if requested and not eval-only)
     if args.finetune and not args.eval:
         print(f"Preparing to load pre-trained weights: {args.finetune}")
@@ -183,18 +270,25 @@ def main(args, criterion):
         if args.model in ["Dinov3", "Dinov2"]:
             checkpoint_path = args.finetune  # local path
         elif args.model in ["RETFound_dinov2", "RETFound_mae"]:
-            print(f"Downloading pre-trained weights from Hugging Face Hub: {args.finetune}")
-            checkpoint_path = hf_hub_download(
-                repo_id=f"YukunZhou/{args.finetune}",
-                filename=f"{args.finetune}.pth",
-            )
+            # Prefer a slimmed local copy (weights only, no optimizer state) if present.
+            local_path = os.path.join("weights", f"{args.finetune}.pth")
+            if os.path.isfile(local_path):
+                print(f"Using local pre-trained weights: {local_path}")
+                checkpoint_path = local_path
+            else:
+                print(f"Downloading pre-trained weights from Hugging Face Hub: {args.finetune}")
+                checkpoint_path = hf_hub_download(
+                    repo_id=f"YukunZhou/{args.finetune}",
+                    filename=f"{args.finetune}.pth",
+                )
         else:
             raise ValueError(
                 f"Unsupported model '{args.model}'. "
                 f"Expected one of: Dinov3, Dinov2, RETFound_dinov2, RETFound_mae"
             )
 
-        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        # mmap keeps tensors on disk until used, so unused parts (e.g. optimizer state) never fill RAM.
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", mmap=True, weights_only=False)
         print(f"Loaded pre-trained checkpoint from: {checkpoint_path}")
 
         if args.model in ["Dinov3", "Dinov2"]:
@@ -212,7 +306,8 @@ def main(args, criterion):
         # -- Remove classifier if shape mismatched
         state_dict = model.state_dict()
         for k in ["head.weight", "head.bias"]:
-            if k in checkpoint_model and checkpoint_model[k].shape != state_dict[k].shape:
+            if k in checkpoint_model and (k not in state_dict
+                                          or checkpoint_model[k].shape != state_dict[k].shape):
                 print(f"Removing key {k} from pretrained checkpoint")
                 del checkpoint_model[k]
 
@@ -265,24 +360,26 @@ def main(args, criterion):
         log_writer = None
 
     # ---- DataLoaders
+    mil = args.task_type is not None and oct_tasks.select_and_split(args)["mil"]
+    collate_fn = oct_tasks.mil_collate if mil else None  # MIL: flatten bags of slices
     if not args.eval:
         data_loader_train = torch.utils.data.DataLoader(
             dataset_train, sampler=sampler_train,
             batch_size=args.batch_size, num_workers=args.num_workers,
-            pin_memory=args.pin_mem, drop_last=True,
+            pin_memory=args.pin_mem, collate_fn=collate_fn, drop_last=True,
         )
         print(f"len of train_set: {len(data_loader_train) * args.batch_size}")
 
         data_loader_val = torch.utils.data.DataLoader(
             dataset_val, sampler=sampler_val,
             batch_size=args.batch_size, num_workers=args.num_workers,
-            pin_memory=args.pin_mem, drop_last=False,
+            pin_memory=args.pin_mem, collate_fn=collate_fn, drop_last=False,
         )
 
     data_loader_test = torch.utils.data.DataLoader(
         dataset_test, sampler=sampler_test,
         batch_size=args.batch_size, num_workers=args.num_workers,
-        pin_memory=args.pin_mem, drop_last=False,
+        pin_memory=args.pin_mem, collate_fn=collate_fn, drop_last=False,
     )
 
     # ---- Mixup/CutMix
@@ -308,8 +405,11 @@ def main(args, criterion):
     # ---- Adaptation toggle
     if args.adaptation == "lp":
         for name, param in model.named_parameters():
-            param.requires_grad = ("head" in name)
-        print("[Adaptation] Linear probe: training classifier head only.")
+            param.requires_grad = name.startswith("head.")
+        trainable = [n for n, p in model.named_parameters() if p.requires_grad]
+        frozen = [n for n, p in model.named_parameters() if not p.requires_grad]
+        assert trainable and all(n.startswith("head.") for n in trainable), trainable
+        print(f"[Adaptation] Encoder frozen ({len(frozen)} tensors); training head only: {trainable}")
     else:
         print("[Adaptation] Full fine-tuning: training all parameters.")
 
@@ -377,7 +477,7 @@ def main(args, criterion):
     # =========================
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
-    max_score = 0.0
+    max_score = float("-inf")  # so the first epoch is always saved, even with score 0
     best_epoch = 0
 
     for epoch in range(args.start_epoch, args.epochs):
@@ -396,9 +496,10 @@ def main(args, criterion):
             num_class=args.nb_classes, log_writer=log_writer
         )
 
-        if max_score < val_score:
+        if max_score < val_score or epoch == args.start_epoch:
             max_score = val_score
             best_epoch = epoch
+            args.best_epoch = epoch
             if args.output_dir and args.savemodel:
                 misc.save_model(
                     args=args, model=model, model_without_ddp=model_without_ddp,
@@ -431,6 +532,15 @@ def main(args, criterion):
         num_class=args.nb_classes, log_writer=None
     )
 
+    if args.hub_repo and args.task_type and misc.is_main_process():
+        try:
+            oct_tasks.push_to_hub(args)
+        except Exception as e:  # don't lose a finished run over an upload error
+            cause = e
+            while cause.__cause__ is not None:  # huggingface_hub wraps the real (network/auth) error
+                cause = cause.__cause__
+            print(f"[Hub] upload failed: {e}" + (f" (cause: {type(cause).__name__}: {cause})" if cause is not e else ""))
+
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print(f"Training time {total_time_str}")
@@ -439,6 +549,8 @@ def main(args, criterion):
 if __name__ == "__main__":
     args = get_args_parser()
     args = args.parse_args()
+    if "all" in args.image_idx:
+        args.image_idx = ["all"]  # every slice of each eye
 
     criterion = torch.nn.CrossEntropyLoss()
 

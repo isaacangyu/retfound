@@ -1,0 +1,6 @@
+target 	kind       	n 	n_pos	roc_auc 	average_precision	brier	prob_mae	f1      	accuracy	precision	recall  	mae       	rmse      	r2       	pearson_r	within_5pct	score
+preCST 	real       	10	     	        	                 	     	        	        	        	         	        	153.289122	171.990943	-0.019978	0.177632 	0.000000   	-0.019978
+preIRF 	binary_hard	10	9    	0.888889	                 	     	        	0.947368	0.900000	0.900000 	1.000000	          	          	         	         	           	0.918129
+prePED 	binary_hard	10	0    	        	                 	     	        	0.000000	1.000000	0.000000 	0.000000	          	          	         	         	           	0.000000
+preHRF 	binary_hard	9 	9    	        	                 	     	        	0.714286	0.555556	1.000000 	0.555556	          	          	         	         	           	0.714286
+overall	mixed      	10	     	0.888889	                 	     	        	0.553885	0.818519	0.633333 	0.518519	153.289122	171.990943	-0.019978	0.177632 	0.000000   	0.403109

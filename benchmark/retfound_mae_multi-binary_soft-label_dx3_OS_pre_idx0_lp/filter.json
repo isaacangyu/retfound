@@ -1,0 +1,124 @@
+{
+  "run": "retfound_mae_multi-binary_soft-label_dx3_OS_pre_idx0_lp",
+  "task_type": "multi_binary",
+  "targets": [
+    {
+      "name": "IRF",
+      "kind": "binary"
+    },
+    {
+      "name": "SRF",
+      "kind": "binary"
+    },
+    {
+      "name": "HRF",
+      "kind": "binary"
+    }
+  ],
+  "label_mode": "soft",
+  "label_smoothing": 0.0,
+  "head": {
+    "type": "mlp",
+    "hidden": 512,
+    "dropout": 0.1
+  },
+  "filter": {
+    "eye": [
+      "OS"
+    ],
+    "visit": [
+      "pre"
+    ],
+    "image_idx": [
+      0
+    ],
+    "diagnosis": [
+      3
+    ],
+    "anti_vegf": "all"
+  },
+  "split_ratio": [
+    0.6,
+    0.2,
+    0.2
+  ],
+  "split_seed": 42,
+  "target_normalisation": {},
+  "counts": {
+    "train": {
+      "samples": 27,
+      "patients": 27,
+      "eyes": 27
+    },
+    "val": {
+      "samples": 9,
+      "patients": 9,
+      "eyes": 9
+    },
+    "test": {
+      "samples": 9,
+      "patients": 9,
+      "eyes": 9
+    }
+  },
+  "patients": {
+    "train": [
+      "AHA-0181",
+      "AHA-0233",
+      "AHA-0414",
+      "AHA-0118",
+      "AHA-0279",
+      "AHA-0108",
+      "AHA-0319",
+      "AHA-0389",
+      "AHA-0137",
+      "AHA-0013",
+      "AHA-0392",
+      "AHA-0041",
+      "AHA-0497",
+      "AHA-0280",
+      "AHA-0129",
+      "AHA-0366",
+      "AHA-0311",
+      "AHA-0431",
+      "AHA-0434",
+      "AHA-0321",
+      "AHA-0140",
+      "AHA-0296",
+      "AHA-0230",
+      "AHA-0271",
+      "AHA-0342",
+      "AHA-0464",
+      "AHA-0000"
+    ],
+    "val": [
+      "AHA-0224",
+      "AHA-0161",
+      "AHA-0496",
+      "AHA-0424",
+      "AHA-0413",
+      "AHA-0490",
+      "AHA-0010",
+      "AHA-0313",
+      "AHA-0050"
+    ],
+    "test": [
+      "AHA-0410",
+      "AHA-0060",
+      "AHA-0107",
+      "AHA-0157",
+      "AHA-0159",
+      "AHA-0167",
+      "AHA-0006",
+      "AHA-0078",
+      "AHA-0459"
+    ]
+  },
+  "model": "RETFound_mae",
+  "finetune": "RETFound_mae_natureOCT",
+  "adaptation": "lp",
+  "input_size": 224,
+  "epochs": 50,
+  "batch_size": 8,
+  "seed": 0
+}

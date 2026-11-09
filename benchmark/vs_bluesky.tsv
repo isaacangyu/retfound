@@ -1,0 +1,4 @@
+run                                                        	index 	metric       	n_eyes	ours    	bluesky_stage1	bluesky_stage2	gap_vs_stage2
+retfound_mae_pre-features_hard-label_dx3_ODOS_pre_idxall_lp	preCST	within_7.5pct	22    	0.181818	0.564300      	0.687100      	-0.505282
+retfound_mae_pre-features_hard-label_dx3_OS_pre_idx0_lp    	preCST	within_7.5pct	10    	0.100000	0.564300      	0.687100      	-0.587100
+retfound_mae_pre-features_soft-label_dx3_ODOS_pre_idxall_lp	preCST	within_7.5pct	22    	0.181818	0.564300      	0.687100      	-0.505282
