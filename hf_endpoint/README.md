@@ -25,4 +25,10 @@ One object per image (a single object if `inputs` was one image, or if `aggregat
 ```
 - Real targets (CST, VA): `value` in original units (z-score undone with the train mean/std from filter.json).
 - Binary targets: `probability` = sigmoid output. `label` (0/1 at `threshold`) only for hard-label runs.
-- `aggregate="mean"` averages values/probabilities over all images (e.g. every slice of one eye) and adds `n_images`.
+- `aggregate="mean"` pools all images of the request into one prediction (mean of raw outputs, then sigmoid / un-z-score,
+  the same as MIL training) and adds `n_images`. It is the default for MIL runs (`filter.json` `mil.enabled`), so send
+  every slice of one eye per request; pass `"aggregate": "none"` for per-slice output.
+
+## Testing
+`python hf_endpoint/test_endpoint.py --run <run>` runs the handler locally on test-split eyes and checks it reproduces
+`predictions_test.csv`. Add `--url <endpoint URL>` to send the same requests to the deployed endpoint instead.

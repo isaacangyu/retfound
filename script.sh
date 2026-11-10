@@ -15,8 +15,8 @@ NUM_WORKERS=0       # CPU data-loader processes per run (CPU cores used per run 
 
 # ==== Runs (one per line) ====
 RUNS=(
-  "--task pre-features --label hard --eye \"OD OS\" --image_idx all"
-  "--task pre-features --label soft --eye \"OD OS\" --image_idx all"
+  # "--task pre-features --label hard --eye \"OD OS\" --image_idx all"
+  # "--task pre-features --label soft --eye \"OD OS\" --image_idx all"
   "--task multi-binary --label soft --eye \"OD OS\" --image_idx all"
   "--task single-real --eye \"OD OS\" --image_idx all"
   "--task response --label hard --eye \"OD OS\" --image_idx all"

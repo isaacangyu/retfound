@@ -481,7 +481,8 @@ def push_to_hub(args):
     ckpt = os.path.join(args.output_dir, args.task, "checkpoint-best.pth")
     files = [(ckpt, "checkpoint-best.pth")]
     files += [(os.path.join(run_dir(args), f), f) for f in ("filter.json", "analysis.tsv", "predictions_test.csv",
-                                                                "vs_bluesky.tsv", "vs_bluesky.png")]
+                                                                "vs_bluesky.tsv", "vs_bluesky_stage1.png", "vs_bluesky_stage2.png",
+                                                                "roc_stage1.png", "roc_stage2.png")]
     for local, name in files:
         if os.path.isfile(local):
             api.upload_file(path_or_fileobj=local, path_in_repo=f"{args.task}/{name}", repo_id=args.hub_repo,

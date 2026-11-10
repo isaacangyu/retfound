@@ -1,2 +1,9 @@
-run                                                    	index 	metric       	n_eyes	ours    	bluesky_stage1	bluesky_stage2	gap_vs_stage2
-retfound_mae_pre-features_hard-label_dx3_OS_pre_idx0_lp	preCST	within_7.5pct	10    	0.100000	0.564300      	0.687100      	-0.587100
+run                                                    	stage	train_set   	index 	metric       	n_eyes	n_pos	ours    	bluesky 	gap
+retfound_mae_pre-features_hard-label_dx3_OS_pre_idx0_lp	1    	TrainingSet1	preCST	within_7.5pct	7     	     	0.142857	0.564300	-0.421443
+retfound_mae_pre-features_hard-label_dx3_OS_pre_idx0_lp	1    	TrainingSet1	preIRF	auc          	7     	6    	1.000000	        	
+retfound_mae_pre-features_hard-label_dx3_OS_pre_idx0_lp	1    	TrainingSet1	prePED	auc          	7     	0    	        	        	
+retfound_mae_pre-features_hard-label_dx3_OS_pre_idx0_lp	1    	TrainingSet1	preHRF	auc          	7     	7    	        	        	
+retfound_mae_pre-features_hard-label_dx3_OS_pre_idx0_lp	2    	TrainingSet2	preCST	within_7.5pct	3     	     	0.000000	0.687100	-0.687100
+retfound_mae_pre-features_hard-label_dx3_OS_pre_idx0_lp	2    	TrainingSet2	preIRF	auc          	3     	3    	        	        	
+retfound_mae_pre-features_hard-label_dx3_OS_pre_idx0_lp	2    	TrainingSet2	prePED	auc          	3     	0    	        	        	
+retfound_mae_pre-features_hard-label_dx3_OS_pre_idx0_lp	2    	TrainingSet2	preHRF	auc          	2     	2    	        	        	

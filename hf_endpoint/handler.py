@@ -11,7 +11,8 @@ Pick the run with the endpoint env var RETFOUND_RUN, or per request with paramet
 If neither is set and the repo has exactly one run, that run is used.
 
 Request:  {"inputs": <image | [images]>, "parameters": {...}}
-Response: one dict per image (or one dict when aggregate="mean"); see README in this folder.
+Response: one dict per image, or one dict when aggregate="mean" (the default for MIL runs,
+which send all slices of one eye per request); see README in this folder.
 
 Local test:   python hf_endpoint/handler.py --path <dir with run folders> img1.jpg img2.jpg
 Upload code:  python hf_endpoint/handler.py --push angisaac/retfound-oct
@@ -119,6 +120,8 @@ class Run:
         self.label_mode = self.info.get("label_mode", "soft")
         self.norm = self.info.get("target_normalisation", {})
         self.epoch = ckpt.get("epoch")
+        # MIL runs were trained on whole eyes (mean of slice logits), so they aggregate by default.
+        self.mil = bool((self.info.get("mil") or {}).get("enabled"))
         self.device = device
         self.model = _build_model(name, model_arch, input_size, ckpt["model"]).to(device)
         del ckpt
@@ -216,11 +219,13 @@ class EndpointHandler:
             return {"error": "no images in 'inputs'"}
         threshold = float(params.get("threshold", 0.5))
 
-        vals = run.decode(run.predict(images))
+        raw = run.predict(images)
         meta = {"run": run.name, "task_type": run.info["task_type"], "label_mode": run.label_mode}
-        if params.get("aggregate") == "mean":  # e.g. all slices of one eye -> one prediction
-            return {**meta, "n_images": len(images), "predictions": run.format(vals.mean(0), threshold)}
-        preds = [{**meta, "predictions": run.format(r, threshold)} for r in vals]
+        aggregate = params.get("aggregate", "mean" if run.mil else "none")
+        if aggregate == "mean":  # all slices of one eye -> one prediction; pools logits, as MIL training does
+            vals = run.decode(raw.mean(0, keepdim=True))[0]
+            return {**meta, "n_images": len(images), "predictions": run.format(vals, threshold)}
+        preds = [{**meta, "predictions": run.format(r, threshold)} for r in run.decode(raw)]
         return preds[0] if single else preds
 
 
@@ -235,7 +240,7 @@ if __name__ == "__main__":
     p.add_argument("images", nargs="*", help="image files to run through the handler")
     p.add_argument("--path", default=".", help="folder containing <run>/checkpoint-best.pth + filter.json")
     p.add_argument("--run", default=None)
-    p.add_argument("--aggregate", default=None, choices=[None, "mean"])
+    p.add_argument("--aggregate", default=None, choices=["none", "mean"])
     p.add_argument("--push", metavar="REPO", help="upload handler.py + requirements.txt to this hub repo")
     a = p.parse_args()
 
