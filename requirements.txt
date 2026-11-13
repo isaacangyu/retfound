@@ -11,3 +11,4 @@ huggingface-hub[hf_xet]>=0.32,<1.0  # Xet = chunked, resumable uploads for the ~
 tensorboard~=2.17.0
 pandas~=2.2.2
 scipy
+xgboost
